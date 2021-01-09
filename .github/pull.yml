@@ -1,0 +1,9 @@
+version: "1"
+
+rules:
+  - base: course
+    upstream: tidb-incubator:course
+    mergeMethod: hardreset
+  - base: master
+    upstream: tidb-incubator:course
+    mergeMethod: merge
