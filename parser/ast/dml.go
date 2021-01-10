@@ -64,6 +64,10 @@ type Join struct {
 	Tp JoinType
 	// On represents join on condition.
 	On *OnCondition
+	// Using represents join using clause.
+	Using []*ColumnName
+	// NaturalJoin represents join is natural join
+	NaturalJoin bool
 }
 
 // Accept implements Node Accept interface.
