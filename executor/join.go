@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/expression"
 	plannercore "github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
@@ -154,6 +155,37 @@ func (e *HashJoinExec) fetchAndBuildHashTable(ctx context.Context) error {
 	// You'll need to store the hash table in `e.rowContainer`
 	// and you can call `newHashRowContainer` in `executor/hash_table.go` to build it.
 	// In this stage you can only assign value for `e.rowContainer` without changing any value of the `HashJoinExec`.
+	/* Your code here */
+	maxChunkSize := e.ctx.GetSessionVars().MaxChunkSize
+	innerKeyColIdx := make([]int, len(e.innerKeys))
+	// innerKeyColTypes := make([]*types.FieldType, len(e.innerKeys))
+	for i := range e.innerKeys {
+		innerKeyColIdx[i] = e.innerKeys[i].Index
+		// innerKeyColTypes[i] = e.innerKeys[i].RetType
+	}
+	innerKeyColTypes := make([]*types.FieldType, 0, len(retTypes(e.innerSideExec)))
+	for _, tp := range retTypes(e.innerSideExec) {
+		innerKeyColTypes = append(innerKeyColTypes, tp.Clone())
+	}
+	hCtx := &hashContext{
+		allTypes:  innerKeyColTypes,
+		keyColIdx: innerKeyColIdx,
+	}
+	initList := chunk.NewList(innerKeyColTypes, maxChunkSize, maxChunkSize)
+	e.rowContainer = newHashRowContainer(e.ctx, int(e.innerSideEstCount), hCtx, initList)
+
+	for {
+		chk := chunk.NewChunkWithCapacity(e.innerSideExec.base().retFieldTypes, maxChunkSize)
+		err := Next(ctx, e.innerSideExec, chk)
+		if err != nil {
+			return err
+		}
+		if chk.NumRows() == 0 {
+			break
+		}
+		e.rowContainer.PutChunk(chk)
+	}
+
 	return nil
 }
 
@@ -250,6 +282,54 @@ func (e *HashJoinExec) runJoinWorker(workerID uint, outerKeyColIdx []int) {
 	// You may pay attention to:
 	//
 	// - e.closeCh, this is a channel tells that the join can be terminated as soon as possible.
+	/* Your code here */
+	var (
+		outerSideResult *chunk.Chunk
+		selected        = make([]bool, 0, chunk.InitialCapacity)
+	)
+	ok, joinResult := e.getNewJoinResult(workerID)
+	if !ok {
+		return
+	}
+
+	emptyOuterSideResult := &outerChkResource{
+		dest: e.outerResultChs[workerID],
+	}
+
+	outerKeyAllTypes := make([]*types.FieldType, 0, len(retTypes(e.outerSideExec)))
+	for _, tp := range retTypes(e.outerSideExec) {
+		outerKeyAllTypes = append(outerKeyAllTypes, tp.Clone())
+	}
+
+	hCtx := &hashContext{
+		allTypes:  outerKeyAllTypes,
+		keyColIdx: outerKeyColIdx,
+	}
+	for ok := true; ok; {
+		select {
+		case <-e.closeCh:
+			return
+		case outerSideResult, ok = <-e.outerResultChs[workerID]:
+		}
+		if !ok {
+			break
+		}
+		ok, joinResult = e.join2Chunk(workerID, outerSideResult, hCtx, joinResult, selected)
+		if !ok {
+			break
+		}
+		outerSideResult.Reset()
+		emptyOuterSideResult.chk = outerSideResult
+		e.outerChkResourceCh <- emptyOuterSideResult
+	}
+
+	if joinResult == nil {
+		return
+	} else if joinResult.err != nil || (joinResult.chk != nil && joinResult.chk.NumRows() > 0) {
+		e.joinResultCh <- joinResult
+	} else if joinResult.chk != nil && joinResult.chk.NumRows() == 0 {
+		e.joinChkResourceCh[workerID] <- joinResult.chk
+	}
 }
 
 func (e *HashJoinExec) getNewJoinResult(workerID uint) (bool, *hashjoinWorkerResult) {

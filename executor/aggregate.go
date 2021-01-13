@@ -29,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/set"
+	"github.com/spaolacci/murmur3"
 	"go.uber.org/zap"
 )
 
@@ -353,6 +354,25 @@ func (w *HashAggPartialWorker) updatePartialResult(ctx sessionctx.Context, sc *s
 // We only support parallel execution for single-machine, so process of encode and decode can be skipped.
 func (w *HashAggPartialWorker) shuffleIntermData(sc *stmtctx.StatementContext, finalConcurrency int) {
 	// TODO: implement the method body. Shuffle the data to final workers.
+	/* Your code here */
+	groupKeysSlice := make([][]string, finalConcurrency)
+	for groupKey := range w.partialResultsMap {
+		finalWokerIdx := int(murmur3.Sum32([]byte(groupKey))) % finalConcurrency
+		if groupKeysSlice[finalWokerIdx] == nil {
+			groupKeysSlice[finalWokerIdx] = make([]string, 0, len(w.partialResultsMap)/finalConcurrency)
+		}
+		groupKeysSlice[finalWokerIdx] = append(groupKeysSlice[finalWokerIdx], groupKey)
+	}
+
+	for i := range groupKeysSlice {
+		if groupKeysSlice[i] == nil {
+			continue
+		}
+		w.outputChs[i] <- &HashAggIntermData{
+			groupKeys:        groupKeysSlice[i],
+			partialResultMap: w.partialResultsMap,
+		}
+	}
 }
 
 // getGroupKey evaluates the group items and args of aggregate functions.
@@ -423,6 +443,43 @@ func (w *HashAggFinalWorker) getPartialInput() (input *HashAggIntermData, ok boo
 
 func (w *HashAggFinalWorker) consumeIntermData(sctx sessionctx.Context) (err error) {
 	// TODO: implement the method body. This method consumes the data given by the partial workers.
+	/* Your code here */
+	var (
+		input            *HashAggIntermData
+		ok               bool
+		intermDataBuffer [][]aggfuncs.PartialResult
+		groupKeys        []string
+		sc               = sctx.GetSessionVars().StmtCtx
+	)
+	for {
+		if input, ok = w.getPartialInput(); !ok {
+			return nil
+		}
+		if intermDataBuffer == nil {
+			intermDataBuffer = make([][]aggfuncs.PartialResult, 0, w.maxChunkSize)
+		}
+		// Consume input in batches, size of every batch is less than w.maxChunkSize.
+		for reachEnd := false; !reachEnd; {
+			intermDataBuffer, groupKeys, reachEnd = input.getPartialResultBatch(sc, intermDataBuffer[:0], w.aggFuncs, w.maxChunkSize)
+			groupKeysLen := len(groupKeys)
+			w.groupKeys = w.groupKeys[:0]
+			for i := 0; i < groupKeysLen; i++ {
+				w.groupKeys = append(w.groupKeys, []byte(groupKeys[i]))
+			}
+			finalPartialResults := w.getPartialResult(sc, w.groupKeys, w.partialResultMap)
+			for i, groupKey := range groupKeys {
+				if !w.groupSet.Exist(groupKey) {
+					w.groupSet.Insert(groupKey)
+				}
+				prs := intermDataBuffer[i]
+				for j, af := range w.aggFuncs {
+					if err = af.MergePartialResult(sctx, prs[j], finalPartialResults[i][j]); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
