@@ -183,7 +183,10 @@ func (e *HashJoinExec) fetchAndBuildHashTable(ctx context.Context) error {
 		if chk.NumRows() == 0 {
 			break
 		}
-		e.rowContainer.PutChunk(chk)
+		err = e.rowContainer.PutChunk(chk)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
