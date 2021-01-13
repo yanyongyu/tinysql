@@ -480,7 +480,6 @@ func (w *HashAggFinalWorker) consumeIntermData(sctx sessionctx.Context) (err err
 			}
 		}
 	}
-	return nil
 }
 
 func (w *HashAggFinalWorker) getFinalResult(sctx sessionctx.Context) {
