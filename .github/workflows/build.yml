@@ -29,10 +29,7 @@ jobs:
         fi
     
     - name: Build
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-      run: make
+      run: CGO_ENABLED=1 GO111MODULE=on go build  -tags codes  -ldflags '-X "github.com/pingcap/parser/mysql.TiDBReleaseVersion=04af15f-dirty" ' -o bin/tidb-server tidb-server/main.go
     
     - name: Upload artifact
       uses: actions/upload-artifact@v2
